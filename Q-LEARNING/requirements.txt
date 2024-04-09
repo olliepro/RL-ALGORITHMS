@@ -1,0 +1,6 @@
+gymnasium
+gymnasium[all]
+gymnasium[classic-control]
+numpy
+ipython
+ipykernel

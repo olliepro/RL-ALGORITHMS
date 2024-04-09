@@ -1,0 +1,10 @@
+gymnasium
+gymnasium[all]
+gymnasium[classic-control]
+numpy
+ipython
+ipykernel
+flappy-bird-env
+torch
+torchvision
+torchaudio
