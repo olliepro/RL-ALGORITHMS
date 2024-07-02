@@ -2,3 +2,6 @@
 .DS_Store
 *.csv
 *.mp4
+Python-3.11.0/*
+*.pth
+*.tgz
