@@ -5,6 +5,7 @@ sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 
 import torch
 import torch.nn as nn
+import gymnasium as gym
 from policy_net import PolicyNetwork
 from value_net import ValueNetwork
 from Training.utils import (
@@ -13,16 +14,17 @@ from Training.utils import (
     EmpiricalFisher,
     A_hat,
 )
+from copy import deepcopy
 from Training.gradient_step import policy_update, value_update
 from GradUtils.hooks import enable_hooks, compute_grad1, clear_backprops, disable_hooks
 from Eval.play import run_discrete_policy
 
 
 def initialize_networks(
-    input_dim: int, hidden_dim: int, output_dim: int
+    continuous: bool, input_dim: int, output_dim: int
 ) -> tuple[PolicyNetwork, ValueNetwork, torch.device]:
-    policy_net = PolicyNetwork(input_dim, hidden_dim, output_dim)
-    value_net = ValueNetwork(input_dim, hidden_dim)
+    policy_net = PolicyNetwork(continuous, input_dim, output_dim)
+    value_net = ValueNetwork(input_dim)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,8 +35,8 @@ def initialize_networks(
 
 
 def run_iteration_and_compute_gradients(
-    policy_net: torch.nn.Module,
-    value_net: torch.nn.Module,
+    policy_net: PolicyNetwork,
+    value_net: ValueNetwork,
     device: torch.device,
     max_steps_per_episode: int,
     gamma: float,
@@ -60,8 +62,6 @@ def run_iteration_and_compute_gradients(
 
     enable_hooks()
 
-    # fmt: off
-    
     # Compute the value function on all states
     values = value_net(iteration_states.detach())
     mean_value = torch.mean(values)
@@ -69,20 +69,26 @@ def run_iteration_and_compute_gradients(
     compute_grad1(value_net)
 
     # Collect the parameter-wise gradients & logit-wise gradients
-    dV_Sn_dTheta = torch.cat([param.grad1.view(batch_size, -1) for param in value_net.parameters()], dim=1)
+    dV_Sn_dTheta = torch.cat(
+        [param.grad1.view(batch_size, -1) for param in value_net.parameters()], dim=1
+    )
     grad_value_logits = value_net.fc2.backprops_list[0].clone() * batch_size
     value_net.zero_grad()
     clear_backprops(value_net)
 
     # Compute the policy log probabilities on all states
-    iteration_log_probs = torch.log(policy_net(iteration_states.detach()))
-    iteration_log_probs = iteration_log_probs[torch.arange(iteration_log_probs.shape[0]), iteration_actions]
+    iteration_log_probs = policy_net.get_log_probs(
+        iteration_states.detach(), iteration_actions
+    )
     mean_log_probs = torch.mean(iteration_log_probs)
     mean_log_probs.backward(retain_graph=True)
     compute_grad1(policy_net)
 
     # Collect the parameter-wise gradients & logit-wise gradients
-    dP_Sn_dTheta = torch.cat([param.grad1.view(batch_size, -1) for param in policy_net.parameters()], dim=1)
+
+    dP_Sn_dTheta = torch.cat(
+        [param.grad1.view(batch_size, -1) for param in policy_net.parameters()], dim=1
+    )
     grad_policy_logits = policy_net.fc2.backprops_list[0].clone() * batch_size
     norm_grad_policy_logits = torch.norm(grad_policy_logits, dim=1, keepdim=True)
     policy_net.zero_grad()
@@ -108,9 +114,6 @@ def run_iteration_and_compute_gradients(
 
 def train(
     env_name: str,
-    input_dim: int,
-    hidden_dim: int,
-    output_dim: int,
     max_steps_per_episode: int,
     gamma: float,
     _lambda: float,
@@ -130,10 +133,15 @@ def train(
     else:
         raise ValueError(f"Invalid EF type: {EF_type}. Must be 'EF' or 'iEF'.")
 
+    env = gym.make(env_name)
+    input_dim = env.observation_space.shape[0]
+    output_dim = (
+        env.action_space.shape[0]
+        if isinstance(env.action_space, gym.spaces.Box)
+        else env.action_space.n
+    )
     policy_net, value_net, device = initialize_networks(
-        input_dim,
-        hidden_dim,
-        output_dim,
+        continuous=True, input_dim=input_dim, output_dim=output_dim
     )
     checkpoint_scores = []
     n_policy_params = sum(p.numel() for p in policy_net.parameters())
@@ -185,8 +193,7 @@ def train(
         grad_policy_loss = torch.cat([param.grad.view(-1) for param in policy_net.parameters()])
         polocy_iEF = EF(dP_Sn_dTheta.T.to(device), norm_grad_policy_logits, damping=EF_damping)
         # fmt: on
-
-        old_policy_direction = policy_update(
+        old_policy_direction, policy_net = policy_update(
             policy_net=policy_net,
             iEF=polocy_iEF,
             old_search_direction=old_policy_direction,
@@ -198,7 +205,6 @@ def train(
             iteration_states=iteration_states,
             trust_region=policy_trust_region,
         )
-
         value_loss = value_net.loss_fn(values.view(-1), iteration_disc_rewards)
         value_loss.backward()
 
@@ -224,9 +230,20 @@ def train(
                 temperature=eval_temperature,
             )
         )
+
         print(f"Checkpoint {i+1} score: {checkpoint_scores[-1]}")
 
-    return checkpoint_scores
+    from Eval.gif import play_and_render_with_temperature
+
+    env = gym.make(env_name, render_mode="rgb_array")
+    play_and_render_with_temperature(
+        policy_net=policy_net,
+        env=env,
+        max_steps_per_episode=max_steps_per_episode,
+        gif_path=f"cartpole.gif",
+        temperature=0.1,
+    )
+    raise ValueError("Done")
 
 
 results = {"iEF": [], "EF": []}
@@ -234,21 +251,18 @@ results = {"iEF": [], "EF": []}
 for fim in ["iEF", "EF"]:
     for i in range(50):
         checkpoints = train(
-            env_name="CartPole-v1",
-            input_dim=4,
-            hidden_dim=50,
-            output_dim=2,
+            env_name="InvertedDoublePendulum-v4",
             max_steps_per_episode=1000,
             gamma=0.99,
             _lambda=0.9,
-            batch_size=10000,
-            policy_trust_region=1e-3,
-            value_trust_region=1e-2,
-            num_iterations=40,
+            batch_size=50000,
+            policy_trust_region=1e-2,
+            value_trust_region=1e-1,
+            num_iterations=100,
             EF_type=fim,
             EF_damping=1e-2,
             num_episodes_eval=20,
-            eval_temperature=0,
+            eval_temperature=0.1,
         )
         results[fim].append(checkpoints)
 

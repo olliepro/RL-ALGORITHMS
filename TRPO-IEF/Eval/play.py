@@ -2,10 +2,11 @@ import torch
 import torch.nn as nn
 import gymnasium as gym
 import numpy as np
+from CartPole.policy_net import PolicyNetwork
 
 
 def run_policy(
-    policy_net: nn.Module,
+    policy_net: PolicyNetwork,
     env_name: str,
     num_episodes: int,
     max_steps_per_episode: int,
@@ -24,16 +25,7 @@ def run_policy(
         while not done and steps < max_steps_per_episode:
             state_tensor = torch.tensor(state, dtype=torch.float32, device=device)
             with torch.no_grad():
-                probs = policy_net(state_tensor)
-
-            if temperature == 0:
-                action = torch.argmax(probs).item()
-            else:
-                # undo the softmax
-                probs = torch.log(probs)
-                probs /= temperature
-                probs = torch.softmax(probs, dim=-1)
-                action = torch.multinomial(probs, num_samples=1).item()
+                action, log_probs = policy_net.sample_action(state_tensor, temperature)
 
             next_state, reward, done1, done2, _ = env.step(action)
 

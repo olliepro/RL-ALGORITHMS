@@ -4,8 +4,9 @@ from GradUtils.hooks import add_hooks
 
 
 class ValueNetwork(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int):
+    def __init__(self, input_dim: int):
         super(ValueNetwork, self).__init__()
+        hidden_dim = 20
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.relu = nn.ReLU()
         self.fc2 = nn.Linear(hidden_dim, 1)

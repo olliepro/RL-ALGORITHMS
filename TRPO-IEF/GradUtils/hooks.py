@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-_supported_layers = ["Linear", "Conv2d"]  # Supported layer class types
+_supported_layers = ["Linear", "Conv2d", "Identity"]  # Supported layer class types
 _hooks_disabled: bool = (
     False  # work-around for https://github.com/pytorch/pytorch/issues/25723
 )
@@ -163,9 +163,6 @@ def compute_grad1(model: nn.Module, loss_type: str = "mean") -> None:
         assert hasattr(
             layer, "backprops_list"
         ), "No backprops detected, run backward after add_hooks(model)"
-        assert (
-            len(layer.backprops_list) == 1
-        ), "Multiple backprops detected, make sure to call clear_backprops(model)"
 
         A = layer.activations
         n = A.shape[0]
@@ -187,3 +184,6 @@ def compute_grad1(model: nn.Module, loss_type: str = "mean") -> None:
             setattr(layer.weight, "grad1", grad1.reshape(shape))
             if layer.bias is not None:
                 setattr(layer.bias, "grad1", torch.sum(B, dim=2))
+
+        elif layer_type == "Identity":
+            setattr(model.std_devs, "grad1", B)

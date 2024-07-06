@@ -2,6 +2,7 @@ import torch
 from copy import deepcopy
 from Training.utils import conjugate_gradient, EmpiricalFisher
 import numpy as np
+from CartPole.policy_net import PolicyNetwork
 
 
 def update_parameters(
@@ -21,7 +22,7 @@ def update_parameters(
 
 
 def policy_update(
-    policy_net: torch.nn.Module,
+    policy_net: PolicyNetwork,
     iEF: EmpiricalFisher,
     old_search_direction: torch.Tensor,
     old_policy_loss: torch.Tensor,
@@ -58,7 +59,8 @@ def policy_update(
         else:
             policy_net.load_state_dict(old_params)
             step = 0.9 * step
-    return search_dir
+
+    return search_dir, policy_net
 
 
 def value_update(

@@ -5,7 +5,7 @@ import numpy as np
 from typing import Union
 from collections import namedtuple
 import torch.multiprocessing as mp
-
+from CartPole.policy_net import PolicyNetwork
 import torch
 import time
 
@@ -60,6 +60,17 @@ def conjugate_gradient(A, b, x0, tol=1e-5, max_iters=None, stop_steps=100):
             unimproved_step = 0
             min_resid = resid_norm
             bestsol = x
+
+        if torch.isnan(resid_norm):
+            print("Residual norm is NaN")
+            import pdb
+
+            pdb.set_trace()
+            A.damping *= 10
+            x = x0
+            r = b - A @ x
+            d = r
+            continue
         done = resid_norm < tol or iters >= max_iters or unimproved_step >= stop_steps
     return bestsol, resid_norm
 
@@ -141,11 +152,11 @@ def A_hat(
     return torch.tensor(A_hats, device=rewards.device)
 
 
-def select_discrete_action(
-    policy: torch.nn.Module,
+def select_action(
+    policy: PolicyNetwork,
     state: Union[np.ndarray, torch.Tensor],
     device: str = None,
-) -> tuple[float, int]:
+) -> tuple[int, torch.Tensor]:
     """
     Select a discrete action from the policy given the state. The action is selected
     using the policy's output probabilities and the state. The function returns the
@@ -157,7 +168,7 @@ def select_discrete_action(
         device (str): The device to use for the state tensor
 
     Returns:
-        tuple[float, int]: The probability of the selected action and the action itself
+        tuple[int, torch.Tensor]: The probability of the selected action and the action itself
     """
     if isinstance(state, np.ndarray):
         if device is None:
@@ -168,9 +179,8 @@ def select_discrete_action(
         if device is not None:
             state = state.to(device)
 
-    probs = policy(state)
-    action = torch.multinomial(probs, num_samples=1).item()
-    return probs[action], action
+    action, logprobs = policy.sample_action(state)
+    return action.item(), torch.exp(logprobs)
 
 
 def worker_process(
@@ -198,8 +208,9 @@ def worker_process(
         steps = 0
 
         while not done and steps < max_steps_per_episode:
-            prob, action = select_discrete_action(policy, state, device)
-            next_state, reward, done1, done2, _ = env.step(action)
+            action, prob = select_action(policy, state, device)
+            action_ = np.array([action])
+            next_state, reward, done1, done2, _ = env.step(action_)
 
             done = done1 or done2
 
@@ -296,7 +307,7 @@ def run_iteration(
     iteration_actions = torch.tensor(iteration_actions, dtype=torch.int64, device=device)
     iteration_rewards = torch.tensor(iteration_rewards, dtype=torch.float32, device=device)
     iteration_disc_rewards = torch.tensor(iteration_disc_rewards, dtype=torch.float32, device=device)
-    iteration_probs = torch.cat([prob.view(1) for prob in iteration_probs]).to(device)
+    iteration_probs = torch.cat(iteration_probs).to(device)
     iteration_log_probs = torch.log(iteration_probs)
     # fmt: on
 

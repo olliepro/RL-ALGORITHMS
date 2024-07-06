@@ -24,36 +24,25 @@ def play_and_render_with_temperature(
     Returns:
     - None
     """
-    state, _ = env.reset()
     done = False
     steps = 0
     min_steps = 300
     device = next(policy_net.parameters()).device
 
     while steps < min_steps:
+        state, _ = env.reset()
         frames = []
         steps = 0
         while not done and steps < max_steps_per_episode:
             state_tensor = torch.tensor(state, dtype=torch.float32).to(device)
             with torch.no_grad():
-                probs = policy_net(state_tensor)
-
-            # Convert probabilities to logits
-            logits = torch.log(probs)
-
-            # Apply temperature to logits
-            logits = logits / temperature
-
-            # Convert logits back to probabilities
-            scaled_probs = torch.softmax(logits, dim=-1)
-
-            action = torch.multinomial(scaled_probs, num_samples=1).item()
+                action, _ = policy_net.sample_action(state_tensor, temperature)
 
             next_state, _, done1, done2, _ = env.step(action)
 
             done = done1 or done2
             # Render the game and capture the frame
-            frame = env.render(mode="rgb_array")
+            frame = env.render()
             frames.append(frame)
 
             state = next_state
