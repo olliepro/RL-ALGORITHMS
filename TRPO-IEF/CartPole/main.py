@@ -42,6 +42,8 @@ def run_iteration_and_compute_gradients(
     gamma: float,
     batch_size: int,
     env_name: str,
+    old_states: torch.Tensor,
+    old_rewards: torch.Tensor,
 ) -> tuple:
     (
         iteration_states,
@@ -63,21 +65,34 @@ def run_iteration_and_compute_gradients(
     enable_hooks()
 
     # Compute the value function on all states
-    values = value_net(iteration_states.detach())
+    if old_states is not None:
+        old_new_states = torch.cat([old_states, iteration_states], dim=0)
+    else:
+        old_new_states = iteration_states
+
+    values = value_net(old_new_states.detach())
     mean_value = torch.mean(values)
     mean_value.backward(retain_graph=True)
     compute_grad1(value_net)
 
     # Collect the parameter-wise gradients & logit-wise gradients
     dV_Sn_dTheta = torch.cat(
-        [param.grad1.view(batch_size, -1) for param in value_net.parameters()], dim=1
+        [param.grad1.view(len(values), -1) for param in value_net.parameters()], dim=1
     )
-    grad_value_logits = value_net.fc2.backprops_list[0].clone() * batch_size
+    grad_value_logits = value_net.output_layer.backprops_list[0].clone() * batch_size
     value_net.zero_grad()
     clear_backprops(value_net)
 
+    if old_rewards is not None:
+        old_reward_index = old_rewards.shape[0]
+        old_new_rewards = torch.cat([old_rewards, iteration_disc_rewards], dim=0)
+    else:
+        old_reward_index = 0
+        old_new_rewards = iteration_disc_rewards
+    value_loss = value_net.loss_fn(values.view(-1), old_new_rewards)
+
     # Compute the policy log probabilities on all states
-    iteration_log_probs = policy_net.get_log_probs(
+    means, iteration_log_probs = policy_net.get_log_probs(
         iteration_states.detach(), iteration_actions
     )
     mean_log_probs = torch.mean(iteration_log_probs)
@@ -89,7 +104,7 @@ def run_iteration_and_compute_gradients(
     dP_Sn_dTheta = torch.cat(
         [param.grad1.view(batch_size, -1) for param in policy_net.parameters()], dim=1
     )
-    grad_policy_logits = policy_net.fc2.backprops_list[0].clone() * batch_size
+    grad_policy_logits = policy_net.output_layer.backprops_list[0].clone() * batch_size
     norm_grad_policy_logits = torch.norm(grad_policy_logits, dim=1, keepdim=True)
     policy_net.zero_grad()
     clear_backprops(policy_net)
@@ -109,6 +124,8 @@ def run_iteration_and_compute_gradients(
         grad_value_logits,
         dP_Sn_dTheta,
         norm_grad_policy_logits,
+        value_loss,
+        old_reward_index,
     )
 
 
@@ -149,6 +166,9 @@ def train(
     old_policy_direction = torch.zeros(n_policy_params, device=device)
     old_value_direction = torch.zeros(n_value_params, device=device)
 
+    iteration_states = None
+    iteration_disc_rewards = None
+
     for i in range(num_iterations):
         (
             iteration_states,
@@ -162,6 +182,8 @@ def train(
             grad_value_logits,
             dP_Sn_dTheta,
             norm_grad_policy_logits,
+            value_loss,
+            old_reward_index,
         ) = run_iteration_and_compute_gradients(
             policy_net=policy_net,
             value_net=value_net,
@@ -170,11 +192,13 @@ def train(
             gamma=gamma,
             batch_size=batch_size,
             env_name=env_name,
+            old_states=iteration_states,
+            old_rewards=iteration_disc_rewards,
         )
 
         batch_A_hat = A_hat(
             rewards=iteration_rewards,
-            values=values.view(-1),
+            values=values[old_reward_index:].view(-1),
             timesteps=iteration_timesteps,
             gamma=gamma,
             _lambda=_lambda,
@@ -205,7 +229,7 @@ def train(
             iteration_states=iteration_states,
             trust_region=policy_trust_region,
         )
-        value_loss = value_net.loss_fn(values.view(-1), iteration_disc_rewards)
+
         value_loss.backward()
 
         # fmt: off
@@ -221,17 +245,33 @@ def train(
             trust_region=value_trust_region,
         )
 
-        checkpoint_scores.append(
-            run_discrete_policy(
-                policy_net=policy_net,
-                env_name=env_name,
-                num_episodes=num_episodes_eval,
-                max_steps_per_episode=max_steps_per_episode,
-                temperature=eval_temperature,
-            )
+        print(
+            f"Checkpoint {i+1} score (temp 1):",
+            (
+                run_discrete_policy(
+                    policy_net=policy_net,
+                    env_name=env_name,
+                    num_episodes=num_episodes_eval,
+                    max_steps_per_episode=max_steps_per_episode,
+                    temperature=1,
+                )
+            ),
         )
-
-        print(f"Checkpoint {i+1} score: {checkpoint_scores[-1]}")
+        print(
+            f"Checkpoint {i+1} score (temp 0):",
+            (
+                run_discrete_policy(
+                    policy_net=policy_net,
+                    env_name=env_name,
+                    num_episodes=num_episodes_eval,
+                    max_steps_per_episode=max_steps_per_episode,
+                    temperature=0,
+                )
+            ),
+        )
+        with torch.no_grad():
+            policy_net.log_std_devs -= 0.0002
+        print("Std Deviations", torch.exp(policy_net.log_std_devs).item())
 
     from Eval.gif import play_and_render_with_temperature
 
@@ -241,7 +281,7 @@ def train(
         env=env,
         max_steps_per_episode=max_steps_per_episode,
         gif_path=f"cartpole.gif",
-        temperature=0.1,
+        temperature=0,
     )
     raise ValueError("Done")
 
@@ -254,15 +294,15 @@ for fim in ["iEF", "EF"]:
             env_name="InvertedDoublePendulum-v4",
             max_steps_per_episode=1000,
             gamma=0.99,
-            _lambda=0.9,
-            batch_size=50000,
+            _lambda=0.96,
+            batch_size=1000,
             policy_trust_region=1e-2,
-            value_trust_region=1e-1,
-            num_iterations=100,
+            value_trust_region=5e-2,
+            num_iterations=3000,
             EF_type=fim,
             EF_damping=1e-2,
-            num_episodes_eval=20,
-            eval_temperature=0.1,
+            num_episodes_eval=50,
+            eval_temperature=1,
         )
         results[fim].append(checkpoints)
 

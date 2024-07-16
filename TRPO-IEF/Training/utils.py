@@ -12,6 +12,8 @@ import time
 
 class EmpiricalFisher:
     def __init__(self, j_n: torch.Tensor, s_n, damping: float = 1e-2):
+        j_n = torch.nan_to_num(j_n)
+
         self.J_n_params_x_batch_size = j_n
         self.damping = damping
 
@@ -26,14 +28,23 @@ class EmpiricalFisher:
 
 class ImprovedEmpiricalFisher(EmpiricalFisher):
     def __init__(self, j_n: torch.Tensor, s_n: torch.Tensor, damping: float = 1e-2):
-
         self.J_n_params_x_batch_size = (j_n.T / s_n).T
+        self.J_n_params_x_batch_size = torch.nan_to_num(
+            self.J_n_params_x_batch_size, 0, 1e3, -1e3
+        )
+        self.J_n_params_x_batch_size = torch.clamp(
+            self.J_n_params_x_batch_size, -1e3, 1e3
+        )
         self.damping = damping
 
 
-def conjugate_gradient(A, b, x0, tol=1e-5, max_iters=None, stop_steps=100):
+def conjugate_gradient(A, b, x0, tol=1e-4, max_iters=None, stop_steps=100):
     if max_iters is None:
         max_iters = b.shape[0]
+    x0 = torch.nan_to_num(x0, 0, 1e3, -1e3)
+    x0 = torch.clamp(x0, -1e3, 1e3)
+    b = torch.nan_to_num(b, 0, 1e3, -1e3)
+    b = torch.clamp(b, -1e3, 1e3)
     x = x0
     r = b - A @ x
     d = r
@@ -43,11 +54,11 @@ def conjugate_gradient(A, b, x0, tol=1e-5, max_iters=None, stop_steps=100):
     unimproved_step = 0
     while not done:
         Ad = A @ d
-        alpha = (r @ d) / (Ad @ d)
+        alpha = (r @ d) / ((Ad @ d) + 1e-8)
         change = alpha * d
         x = x + change
         r_new = b - A @ x
-        beta = (Ad @ r_new) / (Ad @ d)
+        beta = (Ad @ r_new) / ((Ad @ d) + 1e-8)
         d = r_new - beta * d
         r = r_new
         iters += 1
@@ -201,6 +212,8 @@ def worker_process(
     iteration_disc_rewards = []
     Trajectory = namedtuple("Trajectory", ["states", "actions", "rewards", "probs"])
 
+    progress_bar = tqdm(total=max_timesteps, desc="Timestep", position=0)
+
     while total_timesteps < max_timesteps:
         state, _ = env.reset()
         trajectory = Trajectory(states=[], actions=[], rewards=[], probs=[])
@@ -223,6 +236,7 @@ def worker_process(
             state = next_state
             steps += 1
             total_timesteps += 1
+            progress_bar.update(1)
             if total_timesteps >= max_timesteps:
                 break
 

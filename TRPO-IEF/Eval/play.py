@@ -27,7 +27,7 @@ def run_policy(
             with torch.no_grad():
                 action, log_probs = policy_net.sample_action(state_tensor, temperature)
 
-            next_state, reward, done1, done2, _ = env.step(action)
+            next_state, reward, done1, done2, _ = env.step(action.cpu().numpy())
 
             done = done1 or done2
             episode_reward_sum += reward

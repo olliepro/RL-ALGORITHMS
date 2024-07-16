@@ -6,20 +6,22 @@ sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 import torch
 import torch.nn as nn
 from GradUtils.hooks import add_hooks
+import numpy as np
 
 
 class PolicyNetwork(nn.Module):
     def __init__(self, continuous: bool, input_dim: int, output_dim: int):
         super(PolicyNetwork, self).__init__()
-        hidden_dim = 50
         self.continuous = continuous
-        self.fc0 = nn.Linear(input_dim, hidden_dim)
+        self.input_layer = nn.Linear(input_dim, input_dim * 10)
+        self.hidden1 = nn.Linear(input_dim * 10, input_dim * 10)
+        self.hidden2 = nn.Linear(input_dim * 10, 8)
+        self.output_layer = nn.Linear(8, output_dim)
         self.activation = nn.ReLU()
-        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
-        self.identity = nn.Identity()
-        if self.continuous:
-            self.std_devs = nn.Parameter(torch.ones(output_dim) * 1)
+        # self.identity = nn.Identity()
+        self.clamp = nn.Hardtanh()
+        self.entropy_reg = 0.1
+        self.log_std_devs = torch.ones(output_dim).cuda() * -0.1
         add_hooks(self)
 
     def sample_action(
@@ -27,9 +29,12 @@ class PolicyNetwork(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.continuous:
             means, stds = self(state)
-            action = torch.normal(means, stds * temperature)
+            if np.random.rand() < torch.exp(self.log_std_devs):
+                action = self.clamp(torch.normal(means, stds * temperature))
+            else:
+                action = self.clamp(means)
             log_prob = torch.distributions.MultivariateNormal(
-                means, torch.diag(torch.exp(self.std_devs))
+                means, torch.diag(torch.exp(self.log_std_devs))
             ).log_prob(action)
             return action.view(-1), log_prob.view(-1)
 
@@ -52,6 +57,31 @@ class PolicyNetwork(nn.Module):
                 ]
                 return action.view(-1), log_prob.view(-1)
 
+    def get_distributions(
+        self, state: torch.Tensor
+    ) -> torch.distributions.Distribution:
+        if self.continuous:
+            means, stds = self(state)
+            import matplotlib.pyplot as plt
+
+            plot_means = means.detach().cpu().squeeze(1).numpy().tolist() + [-1, 1]
+            plt.hist(plot_means, bins=50)
+            plt.xlim(-1, 1)
+            plt.savefig("means.png")
+            plt.close()
+            cov = torch.diag_embed(stds)
+            return torch.distributions.MultivariateNormal(means, cov)
+        else:
+            raise NotImplementedError("Discrete action spaces not implemented")
+
+    def get_kl_divergence(
+        self,
+        state: torch.Tensor,
+        target_dist: torch.distributions.Distribution,
+    ) -> torch.Tensor:
+        current_dist = self.get_distributions(state)
+        return torch.distributions.kl_divergence(current_dist, target_dist)
+
     def get_log_probs(self, state: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         if self.continuous:
             means, stds = self(state)
@@ -60,7 +90,7 @@ class PolicyNetwork(nn.Module):
                 means,
                 cov,
             ).log_prob(actions.unsqueeze(-1))
-            return log_probs
+            return means, log_probs
         else:
             logits = self(state)
             if len(logits.shape) == 1:
@@ -69,13 +99,14 @@ class PolicyNetwork(nn.Module):
             return log_probs[torch.arange(log_probs.shape[0]), actions]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.activation(self.fc0(x))
-        x = self.activation(self.fc1(x))
-        mus = self.fc2(x)
+        x = self.activation(self.input_layer(x))
+        x = self.activation(self.hidden1(x))
+        x = self.activation(self.hidden2(x))
+        mus = self.output_layer(x)
         if self.continuous:
-            stds = mus * 0 + self.std_devs
+            stds = mus * 0 + self.log_std_devs
 
-            return mus, torch.exp(self.identity(stds))
+            return mus, torch.exp(stds)
 
         return mus
 
@@ -85,12 +116,14 @@ class PolicyNetwork(nn.Module):
         batch_A_hat: torch.Tensor,
         actions: torch.Tensor,
         states: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         old_probs = probs.detach()
-        new_log_probs = self.get_log_probs(states, actions)
+        means, new_log_probs = self.get_log_probs(states, actions)
         new_probs = torch.exp(new_log_probs)
+        # dists = self.get_distributions(states)
         losses = (new_probs / old_probs) * batch_A_hat
-        return -torch.mean(losses)
+
+        return -torch.mean(losses)  # - means.var()
 
 
 import torch

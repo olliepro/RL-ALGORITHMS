@@ -186,4 +186,4 @@ def compute_grad1(model: nn.Module, loss_type: str = "mean") -> None:
                 setattr(layer.bias, "grad1", torch.sum(B, dim=2))
 
         elif layer_type == "Identity":
-            setattr(model.std_devs, "grad1", B)
+            setattr(model.log_std_devs, "grad1", B)

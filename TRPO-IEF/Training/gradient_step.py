@@ -43,22 +43,30 @@ def policy_update(
     step = alpha * search_dir
     i = 0
     # Update the policy network ensuring improvement after a line search
+
+    old_params = deepcopy(policy_net.state_dict())
+    old_dists = policy_net.get_distributions(iteration_states)
+
     while True:
         i += 1
-        old_params = deepcopy(policy_net.state_dict())
+
         update_parameters(policy_net, step)
+        new_dists = policy_net.get_distributions(iteration_states)
+        kl_div = torch.distributions.kl_divergence(old_dists, new_dists).mean()
         new_policy_loss = policy_net.loss_fn(
             iteration_probs, batch_A_hat, iteration_actions, iteration_states
         )
-        if new_policy_loss <= old_policy_loss:
+        if (new_policy_loss - old_policy_loss) / torch.abs(
+            old_policy_loss
+        ) <= 0.01 and kl_div <= trust_region:
             break
-        elif i > 200:
+        elif i > 30:
             print("Line search failed")
             policy_net.load_state_dict(old_params)
             break
         else:
             policy_net.load_state_dict(old_params)
-            step = 0.9 * step
+            step = 0.8 * step
 
     return search_dir, policy_net
 
@@ -76,7 +84,7 @@ def value_update(
         b=-grad_value_loss,
         x0=old_value_direction,
     )
-    value_alpha = torch.sqrt(trust_region / (search_dir @ (iEF @ search_dir)))
+    value_alpha = torch.sqrt(2 * trust_region / (search_dir @ (iEF @ search_dir)))
     value_step = value_alpha * search_dir
     update_parameters(value_net, value_step)
     return search_dir

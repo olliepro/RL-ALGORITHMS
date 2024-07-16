@@ -26,7 +26,7 @@ def play_and_render_with_temperature(
     """
     done = False
     steps = 0
-    min_steps = 300
+    min_steps = 100
     device = next(policy_net.parameters()).device
 
     while steps < min_steps:
@@ -38,7 +38,7 @@ def play_and_render_with_temperature(
             with torch.no_grad():
                 action, _ = policy_net.sample_action(state_tensor, temperature)
 
-            next_state, _, done1, done2, _ = env.step(action)
+            next_state, _, done1, done2, _ = env.step(action.cpu().numpy())
 
             done = done1 or done2
             # Render the game and capture the frame
